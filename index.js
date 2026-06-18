@@ -5,6 +5,7 @@ const MODULE_NAME = 'vertex_auto_retry';
 let retryCount = 0;
 const MAX_RETRIES = 3;
 let isTimeoutActive = false;
+let userAborted = false; // Флаг ручной остановки генерации
 
 let settings = {
     enabled: true,
@@ -33,12 +34,22 @@ function isGoogleProvider() {
     return currentApiText.includes('vertex') || currentApiText.includes('google') || currentApiText.includes('gemini');
 }
 
+// СБРОС: когда пользователь отправляет новое сообщение или нажимает Enter
 eventSource.on(event_types.MESSAGE_SENT, () => {
     retryCount = 0;
+    userAborted = false;
 });
 
-// ИСПРАВЛЕНО: Теперь используем официальную команду /regenerate вместо /retry
+// ПЕРЕХВАТ НАЖАТИЯ КНОПКИ "СТОП" В ИНТЕРФЕЙСЕ
+$(document).on('click', '#stop_generation, .stop_generation_btn, [id*="stop"]', () => {
+    userAborted = true;
+    console.log(`[${MODULE_NAME}] Пользователь вручную остановил генерацию. Автоповтор заблокирован.`);
+    // Сбрасываем флаг через пару секунд, чтобы не блокировать будущие случайные ошибки
+    setTimeout(() => { userAborted = false; }, 3000);
+});
+
 async function triggerRetry() {
+    if (userAborted) return;
     const command = '/regenerate';
     if (slashModule && slashModule.executeSlashCommandsAsync) {
         await slashModule.executeSlashCommandsAsync(command);
@@ -55,7 +66,10 @@ async function triggerRetry() {
 }
 
 function handleFailureDetected(reasonText) {
-    if (!settings.enabled || isTimeoutActive || !isGoogleProvider()) return;
+    // ЖЕСТКИЙ ЗАПРЕТ: Если выключено, идет тайм-аут, не тот провайдер ИЛИ пользователь нажал стоп
+    if (!settings.enabled || isTimeoutActive || !isGoogleProvider() || userAborted) {
+        return;
+    }
 
     if (retryCount >= MAX_RETRIES) {
         console.warn(`[${MODULE_NAME}] Превышен лимит автоповторов (${MAX_RETRIES}).`);
@@ -66,54 +80,104 @@ function handleFailureDetected(reasonText) {
     retryCount++;
     isTimeoutActive = true;
 
-    console.log(`[${MODULE_NAME}] СЕТЕВОЙ ПЕРЕХВАТ: ${reasonText}. Ждем ${settings.interval} сек...`);
+    console.log(`[${MODULE_NAME}] СБОЙ АПИ: ${reasonText}. Попытка ${retryCount}/${MAX_RETRIES}. Ждем ${settings.interval} сек...`);
 
-    // Закрываем плашки ошибок, чтобы не захламлять экран
+    // Закрываем плашку ошибки, чтобы не висела перед глазами
     setTimeout(() => {
         const toast = document.querySelector('.toast-error, .toastr-error, #toast-container');
         if (toast && typeof toast.click === 'function') toast.click();
     }, 200);
 
     setTimeout(async () => {
-        await triggerRetry();
+        // Дополнительная проверка перед отправкой, не нажали ли мы "стоп" за эти секунды ожидания
+        if (!userAborted) {
+            await triggerRetry();
+        }
         isTimeoutActive = false;
     }, settings.interval * 1000);
 }
 
+// УМНЫЙ СЕТЕВОЙ ПЕРЕХВАТЧИК
 function initNetworkHook() {
     const originalFetch = window.fetch;
 
     window.fetch = async function (...args) {
+        const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+        
+        // ЗАЩИТА 1: Реагируем ТОЛЬКО на запросы генерации текста SillyTavern. Чужие расширения идут мимо.
+        const isGenerationUrl = url.includes('/api/backends/') || url.includes('/generate');
+
         try {
             const response = await originalFetch.apply(this, args);
             
-            if (response.status === 429) {
-                handleFailureDetected('Сервер вернул HTTP статус 429');
-                return response;
-            }
+            if (isGenerationUrl) {
+                // Если статус 429 (Too Many Requests) — это стопроцентный сбой лимитов Google
+                if (response.status === 429) {
+                    handleFailureDetected('Сервер вернул статус 429 (Превышение лимитов)');
+                    return response;
+                }
 
-            const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
-            if (url.includes('/api/')) {
-                const clone = response.clone();
-                
-                clone.text().then(text => {
-                    if (text) {
-                        const lowText = text.toLowerCase();
-                        if (lowText.includes('429') || lowText.includes('capacity') || lowText.includes('api_error')) {
-                            handleFailureDetected('Обнаружена ошибка 429/Capacity в теле ответа сервера');
+                // ЗАЩИТА 2: Читаем текст ответа ТОЛЬКО если статус ошибочный (500, 400 и т.д.)
+                // Если статус 200 (ОК) — мы ОСТАВЛЯЕМ ОТВЕТ В ПОКОЕ и никогда не лезем внутрь его слов!
+                if (!response.ok && response.status !== 200) {
+                    const clone = response.clone();
+                    clone.text().then(text => {
+                        if (text) {
+                            const lowText = text.toLowerCase();
+                            if (lowText.includes('429') || lowText.includes('capacity') || lowText.includes('api_error')) {
+                                handleFailureDetected('Ошибка сервера в структуре JSON ответа');
+                            }
                         }
-                    }
-                }).catch(() => {});
+                    }).catch(() => {});
+                }
             }
 
             return response;
         } catch (error) {
-            handleFailureDetected(`Сбой сетевого запроса: ${error.message}`);
+            if (isGenerationUrl) {
+                // ЗАЩИТА 3: Игнорируем ошибку сети, если запрос был прерван вручную (AbortError)
+                if (error.name === 'AbortError' || error.message?.toLowerCase().includes('abort') || userAborted) {
+                    userAborted = true;
+                    return;
+                }
+                handleFailureDetected(`Критический обрыв соединения: ${error.message}`);
+            }
             throw error;
         }
     };
 
-    console.log(`[${MODULE_NAME}] Сетевой анализатор трафика успешно запущен.`);
+    console.log(`[${MODULE_NAME}] Сетевой анализатор трафика успешно запущен в защищенном режиме.`);
+}
+
+// Резервная проверка на пустой ответ чата (если цензура сожрала текст, но статус остался 200)
+async function handleGenerationEnded() {
+    await new Promise(resolve => setTimeout(resolve, 600));
+    if (!settings.enabled || isTimeoutActive || !isGoogleProvider() || userAborted) return;
+
+    let currentChat = null;
+    if (typeof getContext === 'function') {
+        currentChat = getContext().chat;
+    } else if (window.SillyTavern && typeof window.SillyTavern.getContext === 'function') {
+        currentChat = window.SillyTavern.getContext().chat;
+    } else if (typeof chat !== 'undefined') {
+        currentChat = chat;
+    } else if (window.chat) {
+        currentChat = window.chat;
+    }
+
+    if (!currentChat || currentChat.length === 0) return;
+
+    const lastMessage = currentChat[currentChat.length - 1];
+    
+    // Триггеримся ТОЛЬКО если бот создал пустую строчку (признак падения стрима или жесткого блока цензуры)
+    const isEmpty = lastMessage.is_user === false && (!lastMessage.mes || lastMessage.mes.trim() === '');
+
+    if (isEmpty) {
+        handleFailureDetected('Цензура или обрыв стрима (абсолютно пустой ответ)');
+    } else if (lastMessage.is_user === false) {
+        // Если текст есть — обнуляем попытки, всё супер
+        retryCount = 0;
+    }
 }
 
 function createUI() {
@@ -142,7 +206,7 @@ function createUI() {
                         <label for="vertex_retry_interval" style="font-size: 0.95em; opacity: 0.9;">Интервал отправки сообщения (в секундах):</label>
                         <input type="number" id="vertex_retry_interval" class="text_accent" min="1" max="120" step="1" value="${settings.interval}" 
                             style="width: 100%; padding: 6px 10px; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.15); color: #fff; border-radius: 4px; box-sizing: border-box;">
-                        <small style="opacity: 0.55; font-size: 0.8em; line-height: 1.2;">Скрипт перехватывает трафик между браузером и Термуксом, автоматизируя ретрай.</small>
+                        <small style="opacity: 0.55; font-size: 0.8em; line-height: 1.2;">Скрипт полностью игнорирует другие расширения и ручную остановку генерации.</small>
                     </div>
                     
                 </div>
@@ -183,7 +247,8 @@ function init() {
     loadSettings();
     createUI();
     initNetworkHook();
-    console.log(`[${MODULE_NAME}] Сетевое расширение полностью готово.`);
+    eventSource.on(event_types.GENERATION_ENDED, handleGenerationEnded);
+    console.log(`[${MODULE_NAME}] Безопасное расширение успешно запущено.`);
 }
 
 eventSource.on(event_types.APP_READY, init);
