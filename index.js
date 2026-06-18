@@ -76,7 +76,7 @@ function handleFailureDetected(reasonText) {
     retryCount++;
     isTimeoutActive = true;
 
-    console.log(`[${MODULE_NAME}] СБОЙ АПИ: ${reasonText}. Попытка ${retryCount}/${MAX_RETRIES}. Ждем ${settings.interval} сек...`);
+    console.log(`[${MODULE_NAME}] ПЕРЕХВАТ СБОЯ: ${reasonText}. Попытка ${retryCount}/${MAX_RETRIES}. Ждем ${settings.interval} сек...`);
 
     setTimeout(() => {
         const toast = document.querySelector('.toast-error, .toastr-error, #toast-container');
@@ -89,6 +89,31 @@ function handleFailureDetected(reasonText) {
         }
         isTimeoutActive = false;
     }, settings.interval * 1000);
+}
+
+// Ультимативный перехват ошибок JS кода (Ловит краш openai.js при цензуре)
+function initGlobalErrorCatch() {
+    // 1. Ловим асинхронные ошибки (Promise Rejections), как на скриншоте
+    window.addEventListener('unhandledrejection', (event) => {
+        if (!settings.enabled || isTimeoutActive || userAborted) return;
+        
+        const errorMsg = event.reason?.message || String(event.reason || '');
+        if (errorMsg.toLowerCase().includes('candidate text empty')) {
+            handleFailureDetected('Цензура Google Vertex (Candidate text empty)');
+        }
+    });
+
+    // 2. Ловим обычные системные ошибки JS на всякий случай
+    window.addEventListener('error', (event) => {
+        if (!settings.enabled || isTimeoutActive || userAborted) return;
+        
+        const errorMsg = event.message || '';
+        if (errorMsg.toLowerCase().includes('candidate text empty')) {
+            handleFailureDetected('Цензура Google Vertex (Candidate text empty)');
+        }
+    });
+
+    console.log(`[${MODULE_NAME}] Перехватчик ошибок цензуры JS успешно запущен.`);
 }
 
 function initNetworkHook() {
@@ -125,15 +150,13 @@ function initNetworkHook() {
             if (isGenerationUrl) {
                 if (error.name === 'AbortError' || error.message?.toLowerCase().includes('abort') || userAborted) {
                     userAborted = true;
-                    throw error; // ИСПРАВЛЕНО: возвращаем ошибку ядру SillyTavern, чтобы не ломать openai.js
+                    throw error;
                 }
                 handleFailureDetected(`Критический обрыв соединения: ${error.message}`);
             }
             throw error;
         }
     };
-
-    console.log(`[${MODULE_NAME}] Сетевой анализатор трафика успешно запущен в защищенном режиме.`);
 }
 
 async function handleGenerationEnded() {
@@ -189,7 +212,7 @@ function createUI() {
                         <label for="vertex_retry_interval" style="font-size: 0.95em; opacity: 0.9;">Интервал отправки сообщения (в секундах):</label>
                         <input type="number" id="vertex_retry_interval" class="text_accent" min="1" max="120" step="1" value="${settings.interval}" 
                             style="width: 100%; padding: 6px 10px; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.15); color: #fff; border-radius: 4px; box-sizing: border-box;">
-                        <small style="opacity: 0.55; font-size: 0.8em; line-height: 1.2;">Скрипт полностью игнорирует другие расширения и корректно обрабатывает ручную остановку.</small>
+                        <small style="opacity: 0.55; font-size: 0.8em; line-height: 1.2;">Скрипт перехватывает ошибки 429 и блокировки цензуры "Candidate text empty".</small>
                     </div>
                     
                 </div>
@@ -230,8 +253,9 @@ function init() {
     loadSettings();
     createUI();
     initNetworkHook();
+    initGlobalErrorCatch(); // Запуск перехватчика цензуры
     eventSource.on(event_types.GENERATION_ENDED, handleGenerationEnded);
-    console.log(`[${MODULE_NAME}] Безопасное расширение успешно обновлено.`);
+    console.log(`[${MODULE_NAME}] Защита от цензуры и сбоев успешно активирована.`);
 }
 
 eventSource.on(event_types.APP_READY, init);
