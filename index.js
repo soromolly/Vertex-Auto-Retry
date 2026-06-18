@@ -91,9 +91,7 @@ function handleFailureDetected(reasonText) {
     }, settings.interval * 1000);
 }
 
-// Ультимативный перехват ошибок JS кода (Ловит краш openai.js при цензуре)
 function initGlobalErrorCatch() {
-    // 1. Ловим асинхронные ошибки (Promise Rejections), как на скриншоте
     window.addEventListener('unhandledrejection', (event) => {
         if (!settings.enabled || isTimeoutActive || userAborted) return;
         
@@ -103,7 +101,6 @@ function initGlobalErrorCatch() {
         }
     });
 
-    // 2. Ловим обычные системные ошибки JS на всякий случай
     window.addEventListener('error', (event) => {
         if (!settings.enabled || isTimeoutActive || userAborted) return;
         
@@ -112,8 +109,6 @@ function initGlobalErrorCatch() {
             handleFailureDetected('Цензура Google Vertex (Candidate text empty)');
         }
     });
-
-    console.log(`[${MODULE_NAME}] Перехватчик ошибок цензуры JS успешно запущен.`);
 }
 
 function initNetworkHook() {
@@ -194,7 +189,7 @@ function createUI() {
         <div class="inline-drawer">
             <div class="inline-drawer-header">
                 <div class="inline-drawer-title">
-                    <i class="fa-solid fa-triangle-exclamation text_accent"></i> Автоповтор Vertex/Gemini AI
+                    <i class="fa-solid fa-rotate text_accent"></i> Авторерол
                 </div>
                 <div class="inline-drawer-icon fa-solid fa-chevron-down"></div>
             </div>
@@ -212,7 +207,6 @@ function createUI() {
                         <label for="vertex_retry_interval" style="font-size: 0.95em; opacity: 0.9;">Интервал отправки сообщения (в секундах):</label>
                         <input type="number" id="vertex_retry_interval" class="text_accent" min="1" max="120" step="1" value="${settings.interval}" 
                             style="width: 100%; padding: 6px 10px; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.15); color: #fff; border-radius: 4px; box-sizing: border-box;">
-                        <small style="opacity: 0.55; font-size: 0.8em; line-height: 1.2;">Скрипт перехватывает ошибки 429 и блокировки цензуры "Candidate text empty".</small>
                     </div>
                     
                 </div>
@@ -253,9 +247,9 @@ function init() {
     loadSettings();
     createUI();
     initNetworkHook();
-    initGlobalErrorCatch(); // Запуск перехватчика цензуры
+    initGlobalErrorCatch();
     eventSource.on(event_types.GENERATION_ENDED, handleGenerationEnded);
-    console.log(`[${MODULE_NAME}] Защита от цензуры и сбоев успешно активирована.`);
+    console.log(`[${MODULE_NAME}] Расширение переименовано в Авторерол и успешно запущено.`);
 }
 
 eventSource.on(event_types.APP_READY, init);
