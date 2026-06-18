@@ -5,7 +5,6 @@ const MODULE_NAME = 'vertex_auto_retry';
 let retryCount = 0;
 const MAX_RETRIES = 3;
 let isTimeoutActive = false;
-let observer = null;
 
 let settings = {
     enabled: true,
@@ -29,12 +28,11 @@ function saveSettings() {
 
 function isGoogleProvider() {
     const apiSelector = document.getElementById('api_selector');
-    if (!apiSelector) return false;
+    if (!apiSelector) return true; 
     const currentApiText = apiSelector.options[apiSelector.selectedIndex]?.text?.toLowerCase() || '';
     return currentApiText.includes('vertex') || currentApiText.includes('google') || currentApiText.includes('gemini');
 }
 
-// Сбрасываем счетчик, если пользователь пишет сам
 eventSource.on(event_types.MESSAGE_SENT, () => {
     retryCount = 0;
 });
@@ -55,12 +53,12 @@ async function triggerRetry() {
     }
 }
 
-// Общая функция обработки сбоя
-function handleFailureDetected(reason) {
+// Единый обработчик команды перезапуска
+function handleFailureDetected(reasonText) {
     if (!settings.enabled || isTimeoutActive || !isGoogleProvider()) return;
 
     if (retryCount >= MAX_RETRIES) {
-        console.warn(`[${MODULE_NAME}] Достигнут лимит автоповторов (${MAX_RETRIES}). Прекращаем попытки.`);
+        console.warn(`[${MODULE_NAME}] Превышен лимит автоповторов (${MAX_RETRIES}).`);
         retryCount = 0;
         return;
     }
@@ -68,13 +66,13 @@ function handleFailureDetected(reason) {
     retryCount++;
     isTimeoutActive = true;
 
-    console.log(`[${MODULE_NAME}] Сбой зафиксирован через: ${reason}. Попытка ${retryCount}/${MAX_RETRIES}. Ждем ${settings.interval} сек...`);
+    console.log(`[${MODULE_NAME}] СЕТЕВОЙ ПЕРЕХВАТ: ${reasonText}. Ждем ${settings.interval} сек...`);
 
-    // Находим и убираем плашку ошибки, чтобы не мешала
-    const toast = document.querySelector('.toast-error, .toastr-error, #toast-container, .toast-message');
-    if (toast && typeof toast.click === 'function') {
-        toast.click();
-    }
+    // Мягко закрываем всплывающие окна ошибок в интерфейсе, если они вылезли
+    setTimeout(() => {
+        const toast = document.querySelector('.toast-error, .toastr-error, #toast-container');
+        if (toast && typeof toast.click === 'function') toast.click();
+    }, 200);
 
     setTimeout(async () => {
         await triggerRetry();
@@ -82,66 +80,46 @@ function handleFailureDetected(reason) {
     }, settings.interval * 1000);
 }
 
-// Обычный анализ чата (на случай, если генерация завершилась, но пришел пустой ответ)
-async function handleGenerationEnded() {
-    await new Promise(resolve => setTimeout(resolve, 600));
-    if (!isGoogleProvider() || isTimeoutActive) return;
+// ГЛОБАЛЬНЫЙ ПЕРЕХВАТ СЕТЕВЫХ ЗАПРОСОВ (Глушит любые сбои Node.js на корню)
+function initNetworkHook() {
+    const originalFetch = window.fetch;
 
-    let currentChat = null;
-    if (typeof getContext === 'function') {
-        currentChat = getContext().chat;
-    } else if (window.SillyTavern && typeof window.SillyTavern.getContext === 'function') {
-        currentChat = window.SillyTavern.getContext().chat;
-    } else if (typeof chat !== 'undefined') {
-        currentChat = chat;
-    } else if (window.chat) {
-        currentChat = window.chat;
-    }
-
-    if (!currentChat || currentChat.length === 0) return;
-
-    const lastMessage = currentChat[currentChat.length - 1];
-    const isEmptyResponse = lastMessage.is_user === false && (!lastMessage.mes || lastMessage.mes.trim() === '');
-
-    if (isEmptyResponse) {
-        handleFailureDetected('Пустой ответ чата');
-    } else if (lastMessage.is_user === false && lastMessage.mes && lastMessage.mes.trim().length > 0) {
-        // Успешная генерация — сброс
-        retryCount = 0;
-    }
-}
-
-// ЖИВОЙ ПЕРЕХВАТ ОШИБОК ИНТЕРФЕЙСА (MutationObserver)
-function startErrorObserver() {
-    if (observer) observer.disconnect();
-
-    // Следим за всем документом на предмет появления плашек с ошибками
-    observer = new MutationObserver((mutations) => {
-        if (!settings.enabled || isTimeoutActive) return;
-
-        for (const mutation of mutations) {
-            for (const node of mutation.addedNodes) {
-                if (node.nodeType !== 1) continue; // Пропускаем не-элементы
-
-                // Проверяем класс нового элемента (SillyTavern использует Toastr / классические плашки)
-                const isToast = node.classList.contains('toast-error') || 
-                                node.classList.contains('toastr-error') || 
-                                node.querySelector('.toast-error, .toast-message');
-
-                if (isToast) {
-                    const text = node.textContent.toLowerCase();
-                    // Проверяем маркеры ошибки из скриншота
-                    if (text.includes('capacity') || text.includes('429') || text.includes('api error') || text.includes('failed')) {
-                        handleFailureDetected(`Обнаружен Toast-алёрт: "${node.textContent.trim()}"`);
-                        return;
-                    }
-                }
+    window.fetch = async function (...args) {
+        try {
+            const response = await originalFetch.apply(this, args);
+            
+            // Если сервер вернул HTTP-код 429 (Too Many Requests), реагируем мгновенно
+            if (response.status === 429) {
+                handleFailureDetected('Сервер вернул HTTP статус 429');
+                return response;
             }
-        }
-    });
 
-    observer.observe(document.body, { childList: true, subtree: true });
-    console.log(`[${MODULE_NAME}] Наблюдатель за интерфейсом ошибок успешно запущен.`);
+            // Проверяем ответы от API генерации SillyTavern
+            const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+            if (url.includes('/api/')) {
+                // Клонируем поток ответа, чтобы не нарушать работу основного кода ST
+                const clone = response.clone();
+                
+                clone.text().then(text => {
+                    if (text) {
+                        const lowText = text.toLowerCase();
+                        // Ищем маркеры критической ошибки Google прямо внутри сырых данных от сервера
+                        if (lowText.includes('429') || lowText.includes('capacity') || lowText.includes('api_error')) {
+                            handleFailureDetected('Обнаружена ошибка 429/Capacity в теле ответа сервера');
+                        }
+                    }
+                }).catch(() => {});
+            }
+
+            return response;
+        } catch (error) {
+            // Перехват падения сети (например, если Термукс на секунду потерял коннект)
+            handleFailureDetected(`Сбой сетевого запроса: ${error.message}`);
+            throw error;
+        }
+    };
+
+    console.log(`[${MODULE_NAME}] Сетевой анализатор трафика успешно запущен.`);
 }
 
 function createUI() {
@@ -170,7 +148,7 @@ function createUI() {
                         <label for="vertex_retry_interval" style="font-size: 0.95em; opacity: 0.9;">Интервал отправки сообщения (в секундах):</label>
                         <input type="number" id="vertex_retry_interval" class="text_accent" min="1" max="120" step="1" value="${settings.interval}" 
                             style="width: 100%; padding: 6px 10px; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.15); color: #fff; border-radius: 4px; box-sizing: border-box;">
-                        <small style="opacity: 0.55; font-size: 0.8em; line-height: 1.2;">Скрипт перехватит ошибку "No capacity" моментально и сделает ретрай через этот интервал.</small>
+                        <small style="opacity: 0.55; font-size: 0.8em; line-height: 1.2;">Скрипт перехватывает трафик между браузером и Термуксом, автоматизируя ретрай.</small>
                     </div>
                     
                 </div>
@@ -210,9 +188,8 @@ function createUI() {
 function init() {
     loadSettings();
     createUI();
-    startErrorObserver();
-    eventSource.on(event_types.GENERATION_ENDED, handleGenerationEnded);
-    console.log(`[${MODULE_NAME}] Расширение полностью готово к перехвату мгновенных ошибок API.`);
+    initNetworkHook();
+    console.log(`[${MODULE_NAME}] Сетевое расширение полностью готово.`);
 }
 
 eventSource.on(event_types.APP_READY, init);
