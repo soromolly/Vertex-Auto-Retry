@@ -1,4 +1,4 @@
-import { eventSource, event_types, getContext } from '/script.js';
+import { eventSource, event_types } from '/script.js';
 import * as slashModule from '/scripts/slash-commands.js';
 
 const MODULE_NAME = 'vertex_auto_retry';
@@ -9,10 +9,10 @@ let isTimeoutActive = false;
 // Настройки по умолчанию
 let settings = {
     enabled: true,
-    interval: 5 // Интервал в секундах по умолчанию
+    interval: 5
 };
 
-// Загрузка сохраненных настроек из браузера
+// Загрузка сохраненных настроек
 function loadSettings() {
     const saved = localStorage.getItem(MODULE_NAME);
     if (saved) {
@@ -42,7 +42,7 @@ eventSource.on(event_types.MESSAGE_SENT, () => {
     retryCount = 0;
 });
 
-// Безопасный вызов команды перезапуска без привязки к жестким экспортам API
+// Безопасный вызов команды перезапуска
 async function triggerRetry() {
     const command = '/retry';
     if (slashModule && slashModule.executeSlashCommandsAsync) {
@@ -50,7 +50,6 @@ async function triggerRetry() {
     } else if (slashModule && slashModule.executeSlashCommands) {
         await slashModule.executeSlashCommands(command);
     } else {
-        // Жесткий фолбек через симуляцию интерфейса ввода, если модули недоступны
         const textarea = document.getElementById('send_textarea');
         const sendBtn = document.getElementById('send_btn');
         if (textarea && sendBtn) {
@@ -68,11 +67,21 @@ async function handleGenerationEnded() {
 
     if (!isVertexAI()) return;
 
-    const context = getContext();
-    const chat = context.chat;
-    if (!chat || chat.length === 0) return;
+    // УЛЬТРА-БЕЗОПАСНЫЙ ПОИСК МАССИВА ЧАТА (без привязки к импорту getContext)
+    let currentChat = null;
+    if (typeof getContext === 'function') {
+        currentChat = getContext().chat;
+    } else if (window.SillyTavern && typeof window.SillyTavern.getContext === 'function') {
+        currentChat = window.SillyTavern.getContext().chat;
+    } else if (typeof chat !== 'undefined') {
+        currentChat = chat;
+    } else if (window.chat) {
+        currentChat = window.chat;
+    }
 
-    const lastMessage = chat[chat.length - 1];
+    if (!currentChat || currentChat.length === 0) return;
+
+    const lastMessage = currentChat[currentChat.length - 1];
 
     const isNoResponse = lastMessage.is_user === true;
     const isEmptyResponse = lastMessage.is_user === false && (!lastMessage.mes || lastMessage.mes.trim() === '');
@@ -95,7 +104,6 @@ async function handleGenerationEnded() {
         
         console.log(`[${MODULE_NAME}] Зафиксирован сбой. Ждем ${settings.interval} сек. перед повторной генерацией...`);
         
-        // Задержка на основе кастомной настройки пользователя
         setTimeout(async () => {
             await triggerRetry();
             isTimeoutActive = false;
@@ -130,7 +138,7 @@ function createUI() {
                     
                     <hr style="border: 0; border-top: 1px solid rgba(255,255,255,0.08); margin: 4px 0;" />
                     
-                    <!-- Тонкая настройка интервала строго в самом низу конфигурационного блока -->
+                    <!-- Тонкая настройка интервала в самом низу конфигурационного блока -->
                     <div style="display: flex; flex-direction: column; gap: 6px;">
                         <label for="vertex_retry_interval" style="font-size: 0.95em; opacity: 0.9;">Интервал отправки сообщения (в секундах):</label>
                         <input type="number" id="vertex_retry_interval" class="text_accent" min="1" max="120" step="1" value="${settings.interval}" 
@@ -146,7 +154,7 @@ function createUI() {
     const $drawer = $(html);
     $(extensionsSettings).append($drawer);
 
-    // Логика сворачивания / разворачивания плашки меню
+    // Логика сворачивания / разворачивания
     $drawer.find('.inline-drawer-header').on('click', function() {
         const $content = $drawer.find('.inline-drawer-content');
         const $icon = $drawer.find('.inline-drawer-icon');
@@ -180,7 +188,7 @@ function init() {
     loadSettings();
     createUI();
     eventSource.on(event_types.GENERATION_ENDED, handleGenerationEnded);
-    console.log(`[${MODULE_NAME}] Расширение успешно инициализировано и встроено в панель.`);
+    console.log(`[${MODULE_NAME}] Расширение успешно инициализировано и добавлено в панель.`);
 }
 
 eventSource.on(event_types.APP_READY, init);
