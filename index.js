@@ -6,7 +6,6 @@ let retryCount = 0;
 let isTimeoutActive = false;
 let userAborted = false;
 
-// Настройки по умолчанию (теперь лимит попыток динамический)
 let settings = {
     enabled: true,
     interval: 5,
@@ -35,6 +34,15 @@ function isGoogleProvider() {
     return currentApiText.includes('vertex') || currentApiText.includes('google') || currentApiText.includes('gemini');
 }
 
+// Поиск массива чата для проверок
+function getCurrentChat() {
+    if (typeof getContext === 'function') return getContext().chat;
+    if (window.SillyTavern && typeof window.SillyTavern.getContext === 'function') return window.SillyTavern.getContext().chat;
+    if (typeof chat !== 'undefined') return chat;
+    if (window.chat) return window.chat;
+    return null;
+}
+
 eventSource.on(event_types.MESSAGE_SENT, () => {
     retryCount = 0;
     userAborted = false;
@@ -46,9 +54,10 @@ $(document).on('click', '#stop_generation, .stop_generation_btn, [id*="stop"]', 
     setTimeout(() => { userAborted = false; }, 3000);
 });
 
+// БЕЗОПАСНЫЙ ЗАПУСК: используем /generate вместо разрушительного /regenerate
 async function triggerRetry() {
     if (userAborted) return;
-    const command = '/regenerate';
+    const command = '/generate'; 
     if (slashModule && slashModule.executeSlashCommandsAsync) {
         await slashModule.executeSlashCommandsAsync(command);
     } else if (slashModule && slashModule.executeSlashCommands) {
@@ -68,7 +77,16 @@ function handleFailureDetected(reasonText) {
         return;
     }
 
-    // Проверка лимита на основе настроек из интерфейса
+    // ЖЕЛЕЗНЫЙ ЩИТ: Если бот уже успешно ответил текстом — это НЕ ошибка генерации текста. Игнорируем!
+    const currentChat = getCurrentChat();
+    if (currentChat && currentChat.length > 0) {
+        const lastMessage = currentChat[currentChat.length - 1];
+        if (lastMessage.is_user === false && lastMessage.mes && lastMessage.mes.trim().length > 0) {
+            console.log(`[${MODULE_NAME}] Текст бота успешно сгенерирован. Ошибка вызвана сторонним модулем (картинки/плагины). Ретрай отменен.`);
+            return;
+        }
+    }
+
     if (retryCount >= settings.maxRetries) {
         console.warn(`[${MODULE_NAME}] Превышен лимит автоповторов (${settings.maxRetries}).`);
         retryCount = 0;
@@ -118,7 +136,9 @@ function initNetworkHook() {
 
     window.fetch = async function (...args) {
         const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
-        const isGenerationUrl = url.includes('/api/backends/') || url.includes('/generate');
+        
+        // СТРОГИЙ ФИЛЬТР URL: Ловим ТОЛЬКО внутренние запросы текстовой генерации мессенджера
+        const isGenerationUrl = url.includes('/api/backends/chat-completions') || url.includes('/api/backends/text-completions');
 
         try {
             const response = await originalFetch.apply(this, args);
@@ -160,17 +180,7 @@ async function handleGenerationEnded() {
     await new Promise(resolve => setTimeout(resolve, 600));
     if (!settings.enabled || isTimeoutActive || !isGoogleProvider() || userAborted) return;
 
-    let currentChat = null;
-    if (typeof getContext === 'function') {
-        currentChat = getContext().chat;
-    } else if (window.SillyTavern && typeof window.SillyTavern.getContext === 'function') {
-        currentChat = window.SillyTavern.getContext().chat;
-    } else if (typeof chat !== 'undefined') {
-        currentChat = chat;
-    } else if (window.chat) {
-        currentChat = window.chat;
-    }
-
+    const currentChat = getCurrentChat();
     if (!currentChat || currentChat.length === 0) return;
 
     const lastMessage = currentChat[currentChat.length - 1];
@@ -211,7 +221,6 @@ function createUI() {
                             style="width: 100%; padding: 6px 10px; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.15); color: #fff; border-radius: 4px; box-sizing: border-box;">
                     </div>
 
-                    <!-- НОВАЯ НАСТРОЙКА: Лимит попыток авторерола -->
                     <div style="display: flex; flex-direction: column; gap: 6px;">
                         <label for="vertex_max_retries" style="font-size: 0.95em; opacity: 0.9;">Максимальное количество попыток:</label>
                         <input type="number" id="vertex_max_retries" class="text_accent" min="1" max="20" step="1" value="${settings.maxRetries}" 
@@ -251,7 +260,6 @@ function createUI() {
         }
     });
 
-    // Обработчик изменения максимального количества попыток
     $drawer.find('#vertex_max_retries').on('input', function() {
         let val = parseInt($(this).val());
         if (!isNaN(val) && val > 0) {
@@ -267,7 +275,7 @@ function init() {
     initNetworkHook();
     initGlobalErrorCatch();
     eventSource.on(event_types.GENERATION_ENDED, handleGenerationEnded);
-    console.log(`[${MODULE_NAME}] Расширение полностью готово и укомплектовано интерфейсом.`);
+    console.log(`[${MODULE_NAME}] Абсолютно безопасная версия запущена.`);
 }
 
 eventSource.on(event_types.APP_READY, init);
